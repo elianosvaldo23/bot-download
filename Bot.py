@@ -2354,9 +2354,11 @@ def main() -> None:
     application.job_queue.run_once(lambda context: init_bot(application), 0)
 
     # Register shutdown handler
-    application.post_shutdown.append(close_session)
+if application.post_shutdown is None:
+    application.post_shutdown = []
+application.post_shutdown.append(close_session)
 
-    # Run the bot until the user presses Ctrl-C
+# Run the bot until the user presses Ctrl-C
     print("Bot started!")
     application.run_polling()
 
