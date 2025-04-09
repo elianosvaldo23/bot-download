@@ -4,12 +4,14 @@ import re
 import time
 import json
 import os
+import base64
+import urllib.parse
 from datetime import datetime, timedelta
 from collections import defaultdict, Counter
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from telegram.constants import ParseMode, ChatAction
-from telegram.error import TelegramError
+from telegram.error import TelegramError, BadRequest
 import aiohttp
 import aiofiles
 import concurrent.futures
@@ -53,28 +55,11 @@ user_history = defaultdict(list)
 # Content index for faster searching
 content_index = {}
 
-# Genre/category mapping
-genre_mapping = {
-    "acción": ["acción", "action", "aventura", "adventure"],
-    "comedia": ["comedia", "comedy", "humor"],
-    "drama": ["drama", "dramático"],
-    "terror": ["terror", "horror", "miedo", "scary"],
-    "ciencia ficción": ["ciencia ficción", "sci-fi", "scifi", "sci fi"],
-    "fantasía": ["fantasía", "fantasy", "magia"],
-    "romance": ["romance", "romántica", "love"],
-    "animación": ["animación", "animation", "animated", "anime"],
-    "documental": ["documental", "documentary", "docu"],
-    "thriller": ["thriller", "suspense", "suspenso"],
-    "crimen": ["crimen", "crime", "criminal"],
-    "misterio": ["misterio", "mystery"],
-    "familiar": ["familiar", "family", "niños", "kids"],
-    "histórico": ["histórico", "historical", "history", "historia"],
-    "bélico": ["bélico", "guerra", "war"],
-    "musical": ["musical", "música", "music"],
-    "western": ["western", "oeste"],
-    "deportes": ["deportes", "sports", "deporte", "sport"],
-    "biografía": ["biografía", "biography", "biopic"],
-}
+# User favorites
+user_favorites = defaultdict(list)
+
+# Shared searches (for handling shared links)
+shared_searches = {}
 
 # Data file paths
 DATA_DIR = "data"
@@ -82,6 +67,7 @@ INDEX_FILE = os.path.join(DATA_DIR, "content_index.json")
 HISTORY_FILE = os.path.join(DATA_DIR, "user_history.json")
 PREFERENCES_FILE = os.path.join(DATA_DIR, "user_preferences.json")
 STATS_FILE = os.path.join(DATA_DIR, "usage_stats.json")
+FAVORITES_FILE = os.path.join(DATA_DIR, "user_favorites.json")
 
 # Usage statistics
 usage_stats = {
@@ -91,11 +77,20 @@ usage_stats = {
     "last_updated": datetime.now().isoformat()
 }
 
+# Quality tags for filtering
+quality_tags = ["4k", "uhd", "1080p", "720p", "hd", "full hd", "bluray", "web-dl", "webrip", "dvdrip"]
+
+# Language tags for filtering
+language_tags = ["español", "latino", "castellano", "subtitulado", "dual", "multi", "english", "ingles", "frances", "italiano", "portugues"]
+
 # Initialize executor for CPU-bound tasks
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
 # Initialize aiohttp session
 session = None
+
+# Bot username (will be set during initialization)
+bot_username = ""
 
 async def initialize_session():
     """Initialize aiohttp session."""
@@ -116,7 +111,7 @@ async def ensure_data_dir():
 
 async def load_data():
     """Load data from files."""
-    global content_index, user_history, user_preferences, usage_stats
+    global content_index, user_history, user_preferences, usage_stats, user_favorites
     
     await ensure_data_dir()
     
@@ -153,6 +148,14 @@ async def load_data():
                 usage_stats["active_users"] = Counter(usage_stats["active_users"])
         except Exception as e:
             logger.error(f"Error loading usage stats: {e}")
+    
+    # Load user favorites
+    if os.path.exists(FAVORITES_FILE):
+        try:
+            async with aiofiles.open(FAVORITES_FILE, 'r', encoding='utf-8') as f:
+                user_favorites = defaultdict(list, json.loads(await f.read()))
+        except Exception as e:
+            logger.error(f"Error loading user favorites: {e}")
 
 async def save_data():
     """Save data to files."""
@@ -190,6 +193,13 @@ async def save_data():
             await f.write(json.dumps(stats_copy))
     except Exception as e:
         logger.error(f"Error saving usage stats: {e}")
+    
+    # Save user favorites
+    try:
+        async with aiofiles.open(FAVORITES_FILE, 'w', encoding='utf-8') as f:
+            await f.write(json.dumps(user_favorites))
+    except Exception as e:
+        logger.error(f"Error saving user favorites: {e}")
 
 async def update_usage_stats(user_id, query):
     """Update usage statistics."""
@@ -211,6 +221,17 @@ async def update_usage_stats(user_id, query):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /start is issued."""
+    # Check if there's a deep link parameter
+    if context.args and len(context.args) > 0:
+        # Try to decode the shared search
+        try:
+            shared_data = context.args[0]
+            await handle_deep_link(update, context, shared_data)
+            return
+        except Exception as e:
+            logger.error(f"Error handling deep link: {e}")
+    
+    # Regular start message
     await update.message.reply_text(
         "¡Hola! Soy un bot de búsqueda de películas y series. "
         "Envíame el nombre de lo que estás buscando y te enviaré los resultados directamente.\n\n"
@@ -220,10 +241,51 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/config - Configurar preferencias\n"
         "/recientes - Ver contenido reciente\n"
         "/historial - Ver tu historial de búsquedas\n"
-        "/generos - Ver categorías disponibles\n"
+        "/favoritos - Ver tus favoritos\n"
+        "/calidad - Buscar por calidad (4K, HD, etc.)\n"
+        "/idioma - Buscar por idioma\n"
         "/stats - Ver estadísticas de uso\n"
         "/notificar - Activar/desactivar notificaciones"
     )
+
+async def handle_deep_link(update: Update, context: ContextTypes.DEFAULT_TYPE, shared_data: str) -> None:
+    """Handle deep link with shared search data."""
+    try:
+        # Decode the shared data
+        decoded_data = base64.b64decode(shared_data).decode('utf-8')
+        shared_info = json.loads(decoded_data)
+        
+        # Extract search query and results
+        query = shared_info.get('query', '')
+        results = shared_info.get('results', [])
+        
+        if query and results:
+            # Show typing action
+            await context.bot.send_chat_action(
+                chat_id=update.effective_chat.id,
+                action=ChatAction.TYPING
+            )
+            
+            # Send welcome message for shared search
+            await update.message.reply_text(
+                f"¡Bienvenido! Estás viendo resultados compartidos para la búsqueda: *{query}*",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            # Send the shared results
+            await send_search_results(update, context, query, results, is_shared=True)
+        else:
+            # If data is invalid, show regular start message
+            await update.message.reply_text(
+                "¡Hola! No pude cargar los resultados compartidos. "
+                "Envíame el nombre de lo que estás buscando y te enviaré los resultados directamente."
+            )
+    except Exception as e:
+        logger.error(f"Error processing shared data: {e}")
+        await update.message.reply_text(
+            "¡Hola! Hubo un problema al cargar los resultados compartidos. "
+            "Envíame el nombre de lo que estás buscando y te enviaré los resultados directamente."
+        )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /help is issued."""
@@ -235,7 +297,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/config - Configurar preferencias\n"
         "/recientes - Ver contenido reciente\n"
         "/historial - Ver tu historial de búsquedas\n"
-        "/generos - Ver categorías disponibles\n"
+        "/favoritos - Ver tus favoritos\n"
+        "/calidad - Buscar por calidad (4K, HD, etc.)\n"
+        "/idioma - Buscar por idioma\n"
         "/stats - Ver estadísticas de uso\n"
         "/notificar - Activar/desactivar notificaciones\n"
         "/limpiar - Limpiar historial de búsquedas\n\n"
@@ -243,7 +307,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "- Simplemente envía el nombre de la película o serie\n"
         "- Usa '#película' o '#serie' para filtrar por tipo\n"
         "- Usa '+año' para buscar por año (ej: 'Avatar +2009')\n"
-        "- Usa '@género' para buscar por género (ej: 'Matrix @acción')\n"
+        "- Usa '$calidad' para buscar por calidad (ej: 'Matrix $4k')\n"
+        "- Usa '%idioma' para buscar por idioma (ej: 'Avengers %latino')\n"
         "- Usa '!' para búsqueda exacta (ej: '!Titanic')\n"
         "- Usa '&' para combinar términos (ej: 'guerra & espacio')\n"
         "- Usa '|' para alternativas (ej: 'batman | superman')\n\n"
@@ -251,7 +316,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "- Sé específico en tus búsquedas\n"
         "- Los resultados se ordenan por relevancia\n"
         "- El contenido está protegido contra reenvío\n"
-        "- Usa el modo de ahorro de datos si tienes conexión lenta",
+        "- Usa el modo de ahorro de datos si tienes conexión lenta\n"
+        "- Puedes compartir resultados con amigos\n"
+        "- Guarda tus favoritos para acceso rápido",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -268,7 +335,9 @@ async def config_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "data_saver": False,
             "notifications": False,
             "adult_content": False,
-            "language": "es"
+            "language": "es",
+            "theme": "default",
+            "view_mode": "compact"
         }
     
     # Create configuration keyboard
@@ -313,6 +382,18 @@ async def config_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             InlineKeyboardButton(
                 f"Idioma: {user_preferences[str(user_id)]['language'].upper()}",
                 callback_data="config_language"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                f"Tema: {user_preferences[str(user_id)]['theme'].capitalize()}",
+                callback_data="config_theme"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                f"Modo de vista: {user_preferences[str(user_id)]['view_mode'].capitalize()}",
+                callback_data="config_view_mode"
             )
         ],
         [
@@ -408,6 +489,14 @@ async def recent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 )
             ])
         
+        # Add refresh button
+        keyboard.append([
+            InlineKeyboardButton(
+                "🔄 Actualizar",
+                callback_data="action_refresh_recent"
+            )
+        ])
+        
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await status_message.edit_text(
@@ -461,22 +550,72 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         parse_mode=ParseMode.MARKDOWN
     )
 
-async def genres_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show available genres/categories."""
-    # Create keyboard with genres
+async def favorites_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show user favorites."""
+    user_id = str(update.effective_user.id)
+    
+    if user_id not in user_favorites or not user_favorites[user_id]:
+        await update.message.reply_text(
+            "No tienes favoritos guardados. Añade contenido a favoritos primero."
+        )
+        return
+    
+    # Create keyboard with favorites
+    keyboard = []
+    for i, favorite in enumerate(user_favorites[user_id]):
+        # Choose icon based on content type
+        icon = "🎬"
+        if favorite.get('type') == 'photo':
+            icon = "📷"
+        elif favorite.get('type') == 'video':
+            icon = "🎥"
+        elif favorite.get('type') == 'document':
+            icon = "📁"
+        elif favorite.get('type') == 'audio':
+            icon = "🎵"
+        elif not favorite.get('has_media', False):
+            icon = "📝"
+        
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{i+1}. {icon} {favorite['title']}",
+                callback_data=f"favorite_{favorite['id']}"
+            )
+        ])
+    
+    # Add clear favorites button
+    keyboard.append([
+        InlineKeyboardButton(
+            "🗑️ Limpiar favoritos",
+            callback_data="favorites_clear"
+        )
+    ])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        "⭐ *Tus favoritos* ⭐\n\n"
+        "Selecciona uno para verlo:",
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def quality_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show quality options for search."""
+    # Create keyboard with quality options
     keyboard = []
     row = []
     
-    for i, (genre, _) in enumerate(genre_mapping.items()):
-        # Create rows with 2 genres each
+    for i, quality in enumerate(quality_tags):
+        # Create rows with 2 qualities each
         if i % 2 == 0 and i > 0:
             keyboard.append(row)
             row = []
         
         row.append(
             InlineKeyboardButton(
-                genre.title(),
-                callback_data=f"genre_{genre}"
+                quality.upper(),
+                callback_data=f"quality_{quality}"
             )
         )
     
@@ -487,8 +626,40 @@ async def genres_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        "🎭 *Categorías y Géneros* 🎭\n\n"
-        "Selecciona un género para ver contenido relacionado:",
+        "🎞️ *Buscar por calidad* 🎞️\n\n"
+        "Selecciona una calidad para ver contenido disponible:",
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def language_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show language options for search."""
+    # Create keyboard with language options
+    keyboard = []
+    row = []
+    
+    for i, language in enumerate(language_tags):
+        # Create rows with 2 languages each
+        if i % 2 == 0 and i > 0:
+            keyboard.append(row)
+            row = []
+        
+        row.append(
+            InlineKeyboardButton(
+                language.capitalize(),
+                callback_data=f"language_{language}"
+            )
+        )
+    
+    # Add the last row if not empty
+    if row:
+        keyboard.append(row)
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        "🌐 *Buscar por idioma* 🌐\n\n"
+        "Selecciona un idioma para ver contenido disponible:",
         reply_markup=reply_markup,
         parse_mode=ParseMode.MARKDOWN
     )
@@ -522,6 +693,9 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if user_id in user_history:
         stats_message += f"Historial guardado: {len(user_history[user_id])} búsquedas\n"
     
+    if user_id in user_favorites:
+        stats_message += f"Favoritos guardados: {len(user_favorites[user_id])} elementos\n"
+    
     # Add last updated timestamp
     if "last_updated" in usage_stats:
         try:
@@ -548,7 +722,9 @@ async def notify_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "data_saver": False,
             "notifications": False,
             "adult_content": False,
-            "language": "es"
+            "language": "es",
+            "theme": "default",
+            "view_mode": "compact"
         }
     
     # Toggle notifications
@@ -662,9 +838,9 @@ async def get_message_content(context: ContextTypes.DEFAULT_TYPE, user_chat_id: 
     
     # Try to get message content
     try:
-        # Use getMessages API method if available (faster)
+        # First try to get the message directly without forwarding
         try:
-            message = await context.bot.forward_message(
+            message = await context.bot.copy_message(
                 chat_id=user_chat_id,
                 from_chat_id=CHANNEL_ID,
                 message_id=msg_id,
@@ -696,17 +872,25 @@ async def get_message_content(context: ContextTypes.DEFAULT_TYPE, user_chat_id: 
             full_content = (text + " " + caption).strip()
             preview = full_content[:50] + "..." if len(full_content) > 50 else full_content
             
-            # Delete the forwarded message
+            # Delete the copied message
             await context.bot.delete_message(
                 chat_id=user_chat_id,
                 message_id=message.message_id
             )
             
-            # Extract genres if possible
-            genres = []
-            for genre, keywords in genre_mapping.items():
-                if any(keyword in full_content.lower() for keyword in keywords):
-                    genres.append(genre)
+            # Extract quality if possible
+            quality = None
+            for q in quality_tags:
+                if q in full_content.lower():
+                    quality = q
+                    break
+            
+            # Extract language if possible
+            language = None
+            for lang in language_tags:
+                if lang in full_content.lower():
+                    language = lang
+                    break
             
             # Try to extract year
             year_match = re.search(r'\b(19\d{2}|20\d{2})\b', full_content)
@@ -726,7 +910,8 @@ async def get_message_content(context: ContextTypes.DEFAULT_TYPE, user_chat_id: 
                 'preview': preview,
                 'full_content': full_content,
                 'type': content_type,
-                'genres': genres,
+                'quality': quality,
+                'language': language,
                 'year': year,
                 'category': content_category,
                 'keywords': extract_keywords(full_content)
@@ -745,9 +930,9 @@ async def get_message_content(context: ContextTypes.DEFAULT_TYPE, user_chat_id: 
             return message_content
             
         except Exception as e:
-            # If forwarding fails, try copying
+            # If direct copy fails, try forwarding
             try:
-                message = await context.bot.copy_message(
+                message = await context.bot.forward_message(
                     chat_id=user_chat_id,
                     from_chat_id=CHANNEL_ID,
                     message_id=msg_id,
@@ -779,17 +964,25 @@ async def get_message_content(context: ContextTypes.DEFAULT_TYPE, user_chat_id: 
                 full_content = (text + " " + caption).strip()
                 preview = full_content[:50] + "..." if len(full_content) > 50 else full_content
                 
-                # Delete the copied message
+                # Delete the forwarded message
                 await context.bot.delete_message(
                     chat_id=user_chat_id,
                     message_id=message.message_id
                 )
                 
-                # Extract genres if possible
-                genres = []
-                for genre, keywords in genre_mapping.items():
-                    if any(keyword in full_content.lower() for keyword in keywords):
-                        genres.append(genre)
+                # Extract quality if possible
+                quality = None
+                for q in quality_tags:
+                    if q in full_content.lower():
+                        quality = q
+                        break
+                
+                # Extract language if possible
+                language = None
+                for lang in language_tags:
+                    if lang in full_content.lower():
+                        language = lang
+                        break
                 
                 # Try to extract year
                 year_match = re.search(r'\b(19\d{2}|20\d{2})\b', full_content)
@@ -809,7 +1002,8 @@ async def get_message_content(context: ContextTypes.DEFAULT_TYPE, user_chat_id: 
                     'preview': preview,
                     'full_content': full_content,
                     'type': content_type,
-                    'genres': genres,
+                    'quality': quality,
+                    'language': language,
                     'year': year,
                     'category': content_category,
                     'keywords': extract_keywords(full_content)
@@ -828,7 +1022,7 @@ async def get_message_content(context: ContextTypes.DEFAULT_TYPE, user_chat_id: 
                 return message_content
                 
             except Exception as inner_e:
-                # If both methods fail, return None
+                # If both methods fail, log the error and return None
                 logger.error(f"Error getting content for message {msg_id}: {inner_e}")
                 return None
     
@@ -848,9 +1042,13 @@ async def parse_query(query):
     year_match = re.search(r'\+(\d{4})', query)
     year_filter = int(year_match.group(1)) if year_match else None
     
-    # Extract genre filter if present
-    genre_match = re.search(r'@(\w+)', query)
-    genre_filter = genre_match.group(1) if genre_match else None
+    # Extract quality filter if present
+    quality_match = re.search(r'\$([\w-]+)', query)
+    quality_filter = quality_match.group(1) if quality_match else None
+    
+    # Extract language filter if present
+    language_match = re.search(r'%([\w-]+)', query)
+    language_filter = language_match.group(1) if language_match else None
     
     # Check for exact match
     exact_match = False
@@ -866,8 +1064,10 @@ async def parse_query(query):
         clean_query = clean_query.replace("#serie", "").replace("#series", "")
     if year_filter:
         clean_query = re.sub(r'\+\d{4}', "", clean_query)
-    if genre_filter:
-        clean_query = re.sub(r'@\w+', "", clean_query)
+    if quality_filter:
+        clean_query = re.sub(r'\$[\w-]+', "", clean_query)
+    if language_filter:
+        clean_query = re.sub(r'%[\w-]+', "", clean_query)
     
     # Handle AND operator
     and_terms = []
@@ -889,7 +1089,8 @@ async def parse_query(query):
         'movie_filter': movie_filter,
         'series_filter': series_filter,
         'year_filter': year_filter,
-        'genre_filter': genre_filter,
+        'quality_filter': quality_filter,
+        'language_filter': language_filter,
         'exact_match': exact_match,
         'and_terms': and_terms,
         'or_terms': or_terms
@@ -912,7 +1113,9 @@ async def search_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "data_saver": False,
             "notifications": False,
             "adult_content": False,
-            "language": "es"
+            "language": "es",
+            "theme": "default",
+            "view_mode": "compact"
         }
     
     # Get user preferences
@@ -1026,7 +1229,9 @@ async def search_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                             continue
                         if parsed_query['year_filter'] and message_content['year'] != str(parsed_query['year_filter']):
                             continue
-                        if parsed_query['genre_filter'] and parsed_query['genre_filter'] not in message_content['genres']:
+                        if parsed_query['quality_filter'] and message_content['quality'] != parsed_query['quality_filter']:
+                            continue
+                        if parsed_query['language_filter'] and message_content['language'] != parsed_query['language_filter']:
                             continue
                         
                         # Check for exact match if requested
@@ -1053,6 +1258,8 @@ async def search_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                             'preview': message_content['preview'],
                             'has_media': message_content['has_media'],
                             'type': message_content['type'],
+                            'quality': message_content.get('quality'),
+                            'language': message_content.get('language'),
                             'relevance': relevance
                         })
                 
@@ -1117,7 +1324,9 @@ async def search_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                                 continue
                             if parsed_query['year_filter'] and message_content['year'] != str(parsed_query['year_filter']):
                                 continue
-                            if parsed_query['genre_filter'] and parsed_query['genre_filter'] not in message_content['genres']:
+                            if parsed_query['quality_filter'] and message_content['quality'] != parsed_query['quality_filter']:
+                                continue
+                            if parsed_query['language_filter'] and message_content['language'] != parsed_query['language_filter']:
                                 continue
                             
                             # Check for exact match if requested
@@ -1152,6 +1361,8 @@ async def search_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                                     'preview': message_content['preview'],
                                     'has_media': message_content['has_media'],
                                     'type': message_content['type'],
+                                    'quality': message_content.get('quality'),
+                                    'language': message_content.get('language'),
                                     'relevance': relevance
                                 })
                                 
@@ -1207,10 +1418,11 @@ async def search_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             f"❌ Ocurrió un error al buscar: {str(e)[:100]}\n\nPor favor intenta más tarde."
         )
 
-async def send_search_results(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str, results: list, status_message=None):
+async def send_search_results(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str, results: list, status_message=None, is_shared=False):
     """Send search results to the user."""
     user_id = str(update.effective_user.id)
     data_saver = user_preferences.get(user_id, {}).get("data_saver", False)
+    view_mode = user_preferences.get(user_id, {}).get("view_mode", "compact")
     
     if not status_message:
         status_message = await update.message.reply_text(
@@ -1234,27 +1446,87 @@ async def send_search_results(update: Update, context: ContextTypes.DEFAULT_TYPE
             elif not match.get('has_media', False):
                 icon = "📝"
             
+            # Add quality and language indicators if available
+            quality_tag = f" [{match.get('quality', '').upper()}]" if match.get('quality') else ""
+            lang_tag = f" ({match.get('language', '').capitalize()})" if match.get('language') else ""
+            
             # Create button text
-            button_text = f"{i+1}. {icon} {match['preview']}"
+            if view_mode == "detailed" and not data_saver:
+                button_text = f"{i+1}. {icon} {match['preview']}{quality_tag}{lang_tag}"
+            elif view_mode == "compact" or data_saver:
+                # In compact mode or data saver mode, make preview shorter
+                preview = match['preview']
+                if len(preview) > 30:
+                    preview = preview[:27] + "..."
+                button_text = f"{i+1}. {icon} {preview}"
+            else:
+                button_text = f"{i+1}. {icon} {match['preview']}"
             
-            # In data saver mode, make preview shorter
-            if data_saver and len(button_text) > 30:
-                button_text = f"{i+1}. {icon} {match['preview'][:27]}..."
-            
-            keyboard.append([
+            # Create row with buttons
+            row = [
                 InlineKeyboardButton(
                     button_text,
                     callback_data=f"send_{match['id']}"
                 )
-            ])
+            ]
+            
+            # In detailed view, add favorite button
+            if view_mode == "detailed" and not data_saver:
+                # Check if this item is already in favorites
+                is_favorite = False
+                if user_id in user_favorites:
+                    for fav in user_favorites[user_id]:
+                        if fav.get('id') == match['id']:
+                            is_favorite = True
+                            break
+                
+                # Add favorite button
+                row.append(
+                    InlineKeyboardButton(
+                        "⭐" if is_favorite else "☆",
+                        callback_data=f"fav_{match['id']}"
+                    )
+                )
+            
+            keyboard.append(row)
+        
+        # Add action buttons
+        action_row = []
         
         # Add share button
-        keyboard.append([
+        # Encode the search results for sharing
+        shared_data = {
+            'query': query,
+            'results': results
+        }
+        encoded_data = base64.b64encode(json.dumps(shared_data).encode('utf-8')).decode('utf-8')
+        share_url = f"https://t.me/share/url?url=https://t.me/{bot_username}?start={encoded_data}"
+        
+        action_row.append(
             InlineKeyboardButton(
                 "📤 Compartir resultados",
-                callback_data=f"share_{query}"
+                url=share_url
             )
-        ])
+        )
+        
+        # Add refresh button
+        action_row.append(
+            InlineKeyboardButton(
+                "🔄 Actualizar",
+                callback_data=f"refresh_{query}"
+            )
+        )
+        
+        keyboard.append(action_row)
+        
+        # Add view mode toggle button if not in data saver mode
+        if not data_saver:
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"👁️ Modo {'compacto' if view_mode == 'detailed' else 'detallado'}",
+                    callback_data="toggle_view_mode"
+                )
+            ])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -1286,8 +1558,14 @@ async def send_search_results(update: Update, context: ContextTypes.DEFAULT_TYPE
             ],
             [
                 InlineKeyboardButton(
-                    "📚 Ver categorías",
-                    callback_data="action_genres"
+                    "🎞️ Buscar por calidad",
+                    callback_data="action_quality"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🌐 Buscar por idioma",
+                    callback_data="action_language"
                 )
             ]
         ]
@@ -1326,10 +1604,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         action = query.data.split('_')[1]
         await handle_history_callback(query, context, action)
     
-    elif query.data.startswith("genre_"):
-        # Handle genre callbacks
-        genre = query.data.split('_')[1]
-        await handle_genre_callback(query, context, genre)
+    elif query.data.startswith("quality_"):
+        # Handle quality callbacks
+        quality = query.data.split('_')[1]
+        await handle_quality_callback(query, context, quality)
+    
+    elif query.data.startswith("language_"):
+        # Handle language callbacks
+        language = query.data.split('_')[1]
+        await handle_language_callback(query, context, language)
     
     elif query.data.startswith("share_"):
         # Handle share callbacks
@@ -1340,6 +1623,30 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         # Handle action callbacks
         action = query.data.split('_')[1]
         await handle_action_callback(query, context, action)
+    
+    elif query.data.startswith("fav_"):
+        # Handle favorite callbacks
+        msg_id = int(query.data.split('_')[1])
+        await handle_favorite_callback(query, context, msg_id)
+    
+    elif query.data.startswith("favorite_"):
+        # Handle favorite item selection
+        msg_id = int(query.data.split('_')[1])
+        await handle_send_callback(query, context, msg_id)
+    
+    elif query.data.startswith("favorites_"):
+        # Handle favorites actions
+        action = query.data.split('_')[1]
+        await handle_favorites_action(query, context, action)
+    
+    elif query.data.startswith("refresh_"):
+        # Handle refresh search
+        query_text = query.data[8:]  # Remove "refresh_" prefix
+        await handle_refresh_callback(query, context, query_text)
+    
+    elif query.data == "toggle_view_mode":
+        # Handle view mode toggle
+        await handle_toggle_view_mode(query, context)
 
 async def handle_send_callback(query, context, msg_id):
     """Handle send content callback."""
@@ -1350,40 +1657,69 @@ async def handle_send_callback(query, context, msg_id):
             action=ChatAction.TYPING
         )
         
-        # Copy the message to the user
-        await context.bot.copy_message(
-            chat_id=query.message.chat_id,
-            from_chat_id=CHANNEL_ID,
-            message_id=msg_id,
-            protect_content=True  # Prevent forwarding/saving
-        )
+        # Try to copy the message to the user
+        try:
+            await context.bot.copy_message(
+                chat_id=query.message.chat_id,
+                from_chat_id=CHANNEL_ID,
+                message_id=msg_id,
+                protect_content=True  # Prevent forwarding/saving
+            )
+            
+            # Answer the callback query
+            await query.answer("Contenido enviado")
+            
+            # Update the original message to show which content was selected
+            # Get the current keyboard
+            keyboard = query.message.reply_markup.inline_keyboard
+            
+            # Find the button that was clicked and mark it as selected
+            new_keyboard = []
+            for row in keyboard:
+                new_row = []
+                for button in row:
+                    if button.callback_data == query.data:
+                        # Mark this button as selected
+                        new_row.append(InlineKeyboardButton(
+                            f"✅ {button.text}",
+                            callback_data=button.callback_data
+                        ))
+                    else:
+                        new_row.append(button)
+                new_keyboard.append(new_row)
+            
+            # Update the message with the new keyboard
+            await query.edit_message_reply_markup(
+                reply_markup=InlineKeyboardMarkup(new_keyboard)
+            )
         
-        # Answer the callback query
-        await query.answer("Contenido enviado")
-        
-        # Update the original message to show which content was selected
-        # Get the current keyboard
-        keyboard = query.message.reply_markup.inline_keyboard
-        
-        # Find the button that was clicked and mark it as selected
-        new_keyboard = []
-        for row in keyboard:
-            new_row = []
-            for button in row:
-                if button.callback_data == query.data:
-                    # Mark this button as selected
-                    new_row.append(InlineKeyboardButton(
-                        f"✅ {button.text}",
-                        callback_data=button.callback_data
-                    ))
-                else:
-                    new_row.append(button)
-            new_keyboard.append(new_row)
-        
-        # Update the message with the new keyboard
-        await query.edit_message_reply_markup(
-            reply_markup=InlineKeyboardMarkup(new_keyboard)
-        )
+        except BadRequest as e:
+            # If copying fails, inform the user
+            logger.error(f"Error copying message {msg_id}: {e}")
+            await query.answer(f"Error: No se pudo enviar el contenido. Intenta con otro resultado.")
+            
+            # Mark the message as unavailable in the keyboard
+            keyboard = query.message.reply_markup.inline_keyboard
+            
+            # Find the button that was clicked and mark it as unavailable
+            new_keyboard = []
+            for row in keyboard:
+                new_row = []
+                for button in row:
+                    if button.callback_data == query.data:
+                        # Mark this button as unavailable
+                        new_row.append(InlineKeyboardButton(
+                            f"❌ {button.text} (No disponible)",
+                            callback_data=button.callback_data
+                        ))
+                    else:
+                        new_row.append(button)
+                new_keyboard.append(new_row)
+            
+            # Update the message with the new keyboard
+            await query.edit_message_reply_markup(
+                reply_markup=InlineKeyboardMarkup(new_keyboard)
+            )
     
     except Exception as e:
         logger.error(f"Error handling send callback: {e}")
@@ -1402,7 +1738,9 @@ async def handle_config_callback(query, context, action):
             "data_saver": False,
             "notifications": False,
             "adult_content": False,
-            "language": "es"
+            "language": "es",
+            "theme": "default",
+            "view_mode": "compact"
         }
     
     # Handle different configuration actions
@@ -1440,6 +1778,20 @@ async def handle_config_callback(query, context, action):
         next_index = (options.index(current) + 1) % len(options) if current in options else 0
         user_preferences[user_id]["language"] = options[next_index]
     
+    elif action == "theme":
+        # Cycle through theme options
+        current = user_preferences[user_id]["theme"]
+        options = ["default", "dark", "light"]
+        next_index = (options.index(current) + 1) % len(options) if current in options else 0
+        user_preferences[user_id]["theme"] = options[next_index]
+    
+    elif action == "view_mode":
+        # Cycle through view mode options
+        current = user_preferences[user_id]["view_mode"]
+        options = ["compact", "detailed"]
+        next_index = (options.index(current) + 1) % len(options) if current in options else 0
+        user_preferences[user_id]["view_mode"] = options[next_index]
+    
     elif action == "save":
         # Save configuration
         await save_data()
@@ -1452,7 +1804,9 @@ async def handle_config_callback(query, context, action):
             f"• Ahorro de datos: {'Activado' if user_preferences[user_id]['data_saver'] else 'Desactivado'}\n"
             f"• Notificaciones: {'Activadas' if user_preferences[user_id]['notifications'] else 'Desactivadas'}\n"
             f"• Contenido adulto: {'Permitir' if user_preferences[user_id]['adult_content'] else 'Filtrar'}\n"
-            f"• Idioma: {user_preferences[user_id]['language'].upper()}"
+            f"• Idioma: {user_preferences[user_id]['language'].upper()}\n"
+            f"• Tema: {user_preferences[user_id]['theme'].capitalize()}\n"
+            f"• Modo de vista: {user_preferences[user_id]['view_mode'].capitalize()}"
         )
         return
     
@@ -1498,6 +1852,18 @@ async def handle_config_callback(query, context, action):
             InlineKeyboardButton(
                 f"Idioma: {user_preferences[user_id]['language'].upper()}",
                 callback_data="config_language"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                f"Tema: {user_preferences[user_id]['theme'].capitalize()}",
+                callback_data="config_theme"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                f"Modo de vista: {user_preferences[user_id]['view_mode'].capitalize()}",
+                callback_data="config_view_mode"
             )
         ],
         [
@@ -1551,7 +1917,8 @@ async def handle_history_callback(query, context, action):
                 # Create a new update object
                 new_update = type('obj', (object,), {
                     'message': message,
-                    'effective_user': type('obj', (object,), {'id': int(user_id)})
+                    'effective_user': type('obj', (object,), {'id': int(user_id)}),
+                    'effective_chat': type('obj', (object,), {'id': query.message.chat_id})
                 })
                 
                 # Call search_content with the new update
@@ -1562,13 +1929,13 @@ async def handle_history_callback(query, context, action):
             logger.error(f"Error handling history callback: {e}")
             await query.answer("Error al procesar la búsqueda")
 
-async def handle_genre_callback(query, context, genre):
-    """Handle genre callbacks."""
-    # Create a search query with the genre
-    search_query = f"@{genre}"
+async def handle_quality_callback(query, context, quality):
+    """Handle quality callbacks."""
+    # Create a search query with the quality
+    search_query = f"${quality}"
     
     # Answer the callback query
-    await query.answer(f"Buscando contenido de género: {genre}")
+    await query.answer(f"Buscando contenido en calidad: {quality.upper()}")
     
     # Create a new message object to simulate user input
     message = type('obj', (object,), {
@@ -1580,7 +1947,33 @@ async def handle_genre_callback(query, context, genre):
     # Create a new update object
     new_update = type('obj', (object,), {
         'message': message,
-        'effective_user': query.from_user
+        'effective_user': query.from_user,
+        'effective_chat': type('obj', (object,), {'id': query.message.chat_id})
+    })
+    
+    # Call search_content with the new update
+    await search_content(new_update, context)
+
+async def handle_language_callback(query, context, language):
+    """Handle language callbacks."""
+    # Create a search query with the language
+    search_query = f"%{language}"
+    
+    # Answer the callback query
+    await query.answer(f"Buscando contenido en idioma: {language.capitalize()}")
+    
+    # Create a new message object to simulate user input
+    message = type('obj', (object,), {
+        'chat_id': query.message.chat_id,
+        'text': search_query,
+        'reply_text': query.message.reply_text
+    })
+    
+    # Create a new update object
+    new_update = type('obj', (object,), {
+        'message': message,
+        'effective_user': query.from_user,
+        'effective_chat': type('obj', (object,), {'id': query.message.chat_id})
     })
     
     # Call search_content with the new update
@@ -1617,11 +2010,18 @@ async def handle_share_callback(query, context, query_text):
             
             share_text += f"\n💬 Compartido por @{query.from_user.username or 'usuario'} usando el Bot de Búsqueda"
             
+            # Encode the search results for sharing
+            shared_data = {
+                'query': query_text,
+                'results': results
+            }
+            encoded_data = base64.b64encode(json.dumps(shared_data).encode('utf-8')).decode('utf-8')
+            
             # Create a keyboard with a button to open the bot
             keyboard = [[
                 InlineKeyboardButton(
                     "🤖 Abrir Bot de Búsqueda",
-                    url=f"https://t.me/{context.bot.username}"
+                    url=f"https://t.me/{bot_username}?start={encoded_data}"
                 )
             ]]
             
@@ -1658,9 +2058,9 @@ async def handle_action_callback(query, context, action):
         
         # Call recent_command
         await recent_command(new_update, context)
-        
-    elif action == "genres":
-        # Create a new update object for genres command
+    
+    elif action == "refresh_recent":
+        # Create a new update object for recent command
         message = type('obj', (object,), {
             'chat_id': query.message.chat_id,
             'reply_text': query.message.reply_text
@@ -1668,15 +2068,212 @@ async def handle_action_callback(query, context, action):
         
         new_update = type('obj', (object,), {
             'message': message,
-            'effective_user': query.from_user
+            'effective_user': query.from_user,
+            'effective_chat': type('obj', (object,), {'id': query.message.chat_id})
         })
         
-        # Call genres_command
-        await genres_command(new_update, context)
+        # Call recent_command
+        await recent_command(new_update, context)
+    
+    elif action == "quality":
+        # Create a new update object for quality command
+        message = type('obj', (object,), {
+            'chat_id': query.message.chat_id,
+            'reply_text': query.message.reply_text
+        })
+        
+        new_update = type('obj', (object,), {
+            'message': message,
+            'effective_user': query.from_user,
+            'effective_chat': type('obj', (object,), {'id': query.message.chat_id})
+        })
+        
+        # Call quality_command
+        await quality_command(new_update, context)
+    
+    elif action == "language":
+        # Create a new update object for language command
+        message = type('obj', (object,), {
+            'chat_id': query.message.chat_id,
+            'reply_text': query.message.reply_text
+        })
+        
+        new_update = type('obj', (object,), {
+            'message': message,
+            'effective_user': query.from_user,
+            'effective_chat': type('obj', (object,), {'id': query.message.chat_id})
+        })
+        
+        # Call language_command
+        await language_command(new_update, context)
+
+async def handle_favorite_callback(query, context, msg_id):
+    """Handle favorite callbacks."""
+    user_id = str(query.from_user.id)
+    
+    # Get message content
+    message_content = None
+    if msg_id in message_cache:
+        message_content = message_cache[msg_id]
+    else:
+        message_content = await get_message_content(context, query.message.chat_id, msg_id)
+    
+    if not message_content:
+        await query.answer("No se pudo obtener información del contenido")
+        return
+    
+    # Check if this item is already in favorites
+    is_favorite = False
+    favorite_index = -1
+    
+    if user_id in user_favorites:
+        for i, fav in enumerate(user_favorites[user_id]):
+            if fav.get('id') == msg_id:
+                is_favorite = True
+                favorite_index = i
+                break
+    
+    # Toggle favorite status
+    if is_favorite:
+        # Remove from favorites
+        user_favorites[user_id].pop(favorite_index)
+        await query.answer("Eliminado de favoritos")
+    else:
+        # Add to favorites
+        if user_id not in user_favorites:
+            user_favorites[user_id] = []
+        
+        user_favorites[user_id].append({
+            'id': msg_id,
+            'title': message_content.get('preview', ''),
+            'has_media': message_content.get('has_media', False),
+            'type': message_content.get('type', 'unknown'),
+            'date_added': datetime.now().strftime('%d/%m/%Y %H:%M')
+        })
+        
+        await query.answer("Añadido a favoritos")
+    
+    # Save favorites
+    await save_data()
+    
+    # Update the keyboard to reflect the change
+    keyboard = query.message.reply_markup.inline_keyboard
+    
+    # Find the favorite button and update it
+    new_keyboard = []
+    for row in keyboard:
+        new_row = []
+        for button in row:
+            if button.callback_data == f"fav_{msg_id}":
+                # Update the favorite button
+                new_row.append(InlineKeyboardButton(
+                    "⭐" if not is_favorite else "☆",
+                    callback_data=f"fav_{msg_id}"
+                ))
+            else:
+                new_row.append(button)
+        new_keyboard.append(new_row)
+    
+    # Update the message with the new keyboard
+    await query.edit_message_reply_markup(
+        reply_markup=InlineKeyboardMarkup(new_keyboard)
+    )
+
+async def handle_favorites_action(query, context, action):
+    """Handle favorites actions."""
+    user_id = str(query.from_user.id)
+    
+    if action == "clear":
+        # Clear favorites
+        if user_id in user_favorites:
+            user_favorites[user_id] = []
+            await save_data()
+        
+        await query.answer("Favoritos eliminados")
+        await query.edit_message_text(
+            "🗑️ Tus favoritos han sido eliminados."
+        )
+
+async def handle_refresh_callback(query, context, query_text):
+    """Handle refresh search callback."""
+    user_id = str(query.from_user.id)
+    
+    # Remove from cache to force a fresh search
+    cache_key = f"{query_text}_{user_id}"
+    if cache_key in search_cache:
+        del search_cache[cache_key]
+    
+    # Answer the callback query
+    await query.answer(f"Actualizando búsqueda: {query_text}")
+    
+    # Create a new message object to simulate user input
+    message = type('obj', (object,), {
+        'chat_id': query.message.chat_id,
+        'text': query_text,
+        'reply_text': query.message.reply_text
+    })
+    
+    # Create a new update object
+    new_update = type('obj', (object,), {
+        'message': message,
+        'effective_user': type('obj', (object,), {'id': int(user_id)}),
+        'effective_chat': type('obj', (object,), {'id': query.message.chat_id})
+    })
+    
+    # Call search_content with the new update
+    await search_content(new_update, context)
+
+async def handle_toggle_view_mode(query, context):
+    """Handle view mode toggle."""
+    user_id = str(query.from_user.id)
+    
+    # Toggle view mode
+    if user_id in user_preferences:
+        current_mode = user_preferences[user_id].get("view_mode", "compact")
+        user_preferences[user_id]["view_mode"] = "detailed" if current_mode == "compact" else "compact"
+        
+        # Save preferences
+        await save_data()
+        
+        # Answer the callback query
+        await query.answer(f"Modo de vista cambiado a: {user_preferences[user_id]['view_mode'].capitalize()}")
+        
+        # Update the button text
+        keyboard = query.message.reply_markup.inline_keyboard
+        
+        # Find the view mode button and update it
+        new_keyboard = []
+        for row in keyboard:
+            new_row = []
+            for button in row:
+                if button.callback_data == "toggle_view_mode":
+                    # Update the view mode button
+                    new_row.append(InlineKeyboardButton(
+                        f"👁️ Modo {'compacto' if user_preferences[user_id]['view_mode'] == 'detailed' else 'detallado'}",
+                        callback_data="toggle_view_mode"
+                    ))
+                else:
+                    new_row.append(button)
+            new_keyboard.append(new_row)
+        
+        # Update the message with the new keyboard
+        await query.edit_message_reply_markup(
+            reply_markup=InlineKeyboardMarkup(new_keyboard)
+        )
+    else:
+        await query.answer("Error al cambiar el modo de vista")
 
 async def init_bot(application: Application) -> None:
     """Initialize the bot."""
+    global bot_username
+    
     logger.info("Initializing bot...")
+    
+    # Get bot info
+    bot = await application.bot.get_me()
+    bot_username = bot.username
+    
+    logger.info(f"Bot username: {bot_username}")
     
     # Initialize aiohttp session
     await initialize_session()
@@ -1744,7 +2341,9 @@ def main() -> None:
     application.add_handler(CommandHandler("config", config_command))
     application.add_handler(CommandHandler("recientes", recent_command))
     application.add_handler(CommandHandler("historial", history_command))
-    application.add_handler(CommandHandler("generos", genres_command))
+    application.add_handler(CommandHandler("favoritos", favorites_command))
+    application.add_handler(CommandHandler("calidad", quality_command))
+    application.add_handler(CommandHandler("idioma", language_command))
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("notificar", notify_command))
     application.add_handler(CommandHandler("limpiar", clear_command))
