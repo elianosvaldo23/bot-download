@@ -16,7 +16,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Bot configuration
-TOKEN = "7551775190:AAFQTB-apYbboDNq-sYwYQaZXrmmxIoNuRo"
+TOKEN = "7551775190:AAH5f-By7WIjmwd4kKBvekj3lzWLGspQQ8g"
 CHANNEL_ID = -1002302159104
 
 # Store the latest message ID
