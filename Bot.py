@@ -10,6 +10,22 @@ from telegram.error import TelegramError
 from database import Database
 from plans import PLANS
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from flask import Flask
+from threading import Thread
+
+# Mantener el bot activo en Render
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "¡El bot está activo!"
+
+def run():
+    app.run(host='0.0.0.0', port=8080)
+
+def keep_alive():
+    t = Thread(target=run)
+    t.start()
 
 # Add this at the top with other constants
 PLANS_INFO = {
@@ -72,27 +88,38 @@ MAX_RESULTS = 10
 # User preferences (store user settings)
 user_preferences = {}
 
+# Lógica para el bot
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send a message when the command /start is issued."""
+    """Maneja el comando /start."""
     user = update.effective_user
-    
-    # Register user in database
-    db.add_user(
-        user.id,
-        user.username,
-        user.first_name,
-        user.last_name
-    )
-    
-    await update.message.reply_text(
-        f"¡Hola {user.first_name}! Soy un bot de búsqueda de películas y series.\n\n"
-        "Comandos disponibles:\n"
-        "/start - Iniciar el bot\n"
-        "/help - Mostrar ayuda\n"
-        "/plan - Ver planes disponibles\n"
-        "/perfil - Ver tu perfil y plan actual\n"
-        "/config - Configurar preferencias"
-    )
+    user_data = db.get_user(user.id)
+
+    if not user_data:  # Solo registrar si el usuario no existe
+        db.add_user(
+            user.id,
+            user.username,
+            user.first_name,
+            user.last_name
+        )
+        await update.message.reply_text(
+            f"¡Hola {user.first_name}! has sido  Registrado correctamente.\n"
+            "Comandos disponibles:\n"
+        	"/start - Iniciar el bot\n"
+        	"/help - Mostrar ayuda\n"
+        	"/plan - Ver planes disponibles\n"
+        	"/perfil - Ver tu perfil y plan actual\n"
+        	"/config - Configurar preferencias"
+        )
+    else:
+        await update.message.reply_text(
+            f"¡Bienvenido de nuevo, {user.first_name}!\n"
+            "Comandos disponibles:\n"
+        	"/start - Iniciar el bot\n"
+        	"/help - Mostrar ayuda\n"
+       	 "/plan - Ver planes disponibles\n"
+        	"/perfil - Ver tu perfil y plan actual\n"
+        	"/config - Configurar preferencias"
+        )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /help is issued."""
@@ -218,39 +245,27 @@ async def per_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
 
 async def perfil_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show user profile and current plan."""
+    """Muestra el perfil del usuario."""
     user = update.effective_user
     user_data = db.get_user(user.id)
-    
-    # Add this block to auto-register user if not found
+
     if not user_data:
-        db.add_user(
-            user.id,
-            user.username,
-            user.first_name,
-            user.last_name
-        )
-        user_data = db.get_user(user.id)
-    
-    if not user_data:
-        await update.message.reply_text("❌ Error al obtener tu perfil.")
+        await update.message.reply_text("❌ No estás registrado. Usa /start para registrarte.")
         return
-    
+
     plan_type = user_data['plan_type']
     plan = PLANS.get(plan_type, PLANS['free'])
-    
-    # Calculate remaining time if not free plan
+
     remaining_time = ""
     if plan_type != 'free' and user_data['plan_expiry']:
         expiry = datetime.strptime(user_data['plan_expiry'], '%Y-%m-%d %H:%M:%S')
         if expiry > datetime.now():
             delta = expiry - datetime.now()
             remaining_time = f"\n⏳ Tiempo restante: {delta.days} días"
-    
-    # Get today's usage
+
     daily_searches_used = db.get_daily_usage(user.id)
     daily_limit = user_data['daily_searches_limit']
-    
+
     await update.message.reply_text(
         f"👤 *Perfil de Usuario*\n\n"
         f"🆔 ID: `{user.id}`\n"
@@ -1146,13 +1161,18 @@ def main() -> None:
         filters.TEXT & ~filters.COMMAND,
         handle_search
     ))
+    
+    application.add_handler(CallbackQueryHandler(plan_button, pattern='^plan_'))
 
     # Add callback query handler
     application.add_handler(CallbackQueryHandler(handle_callback))
 
     # Initialize the bot
     application.job_queue.run_once(lambda context: init_bot(application), 0)
-
+	
+	# Mantener el servidor Flask activo
+    keep_alive()
+	
     # Start the bot
     print("Bot started!")
     application.run_polling()
