@@ -167,7 +167,7 @@ class Database:
             'daily_searches_limit': result[7],
             'can_forward': bool(result[8])
         }
-    return None
+        return None
     
     def get_all_users(self) -> List[Dict]:
         """Get all users for announcements."""
