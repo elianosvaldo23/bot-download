@@ -9,6 +9,32 @@ from telegram.constants import ParseMode, ChatAction
 from telegram.error import TelegramError
 from database import Database
 from plans import PLANS
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+# Add this at the top with other constants
+PLANS_INFO = {
+    'basic': {
+        'name': 'Plan Básico',
+        'price': '5 USD',
+        'searches': 10,
+        'days': 30,
+        'features': ['10 búsquedas diarias', 'Reenvío permitido', 'Duración: 30 días']
+    },
+    'premium': {
+        'name': 'Plan Premium',
+        'price': '10 USD',
+        'searches': 20,
+        'days': 30,
+        'features': ['20 búsquedas diarias', 'Reenvío permitido', 'Duración: 30 días']
+    },
+    'unlimited': {
+        'name': 'Plan Ilimitado',
+        'price': '20 USD',
+        'searches': 999,
+        'days': 30,
+        'features': ['Búsquedas ilimitadas', 'Reenvío permitido', 'Duración: 30 días']
+    }
+}
 
 # Enable logging
 logging.basicConfig(
@@ -196,6 +222,16 @@ async def perfil_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user = update.effective_user
     user_data = db.get_user(user.id)
     
+    # Add this block to auto-register user if not found
+    if not user_data:
+        db.add_user(
+            user.id,
+            user.username,
+            user.first_name,
+            user.last_name
+        )
+        user_data = db.get_user(user.id)
+    
     if not user_data:
         await update.message.reply_text("❌ Error al obtener tu perfil.")
         return
@@ -229,45 +265,40 @@ async def perfil_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def plan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /plan command."""
-    user_id = update.effective_user.id
-    args = context.args
-    
-    # Admin handling section remains the same...
-    
-    # Modify the keyboard creation for regular users
-    keyboard = []
-    for plan_id, plan in PLANS.items():
-        if plan_id != 'free':
-            keyboard.append([
-                InlineKeyboardButton(
-                    f"{plan.name} - {plan.price} CUP",
-                    url=f"https://t.me/Osvaldo20032"  # Direct link to admin
-                )
-            ])
+    keyboard = [
+        [
+            InlineKeyboardButton("Plan Básico", callback_data='plan_basic'),
+            InlineKeyboardButton("Plan Premium", callback_data='plan_premium')
+        ],
+        [InlineKeyboardButton("Plan Ilimitado", callback_data='plan_unlimited')]
+    ]
     
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
     await update.message.reply_text(
-        "🎬 *Planes Disponibles*\n\n"
-        "*Plan Gratuito:*\n"
-        "• 3 búsquedas diarias\n"
-        "• Sin reenvío\n\n"
-        "*Plan Estándar - 100 CUP:*\n"
-        "• 20 búsquedas diarias\n"
-        "• Reenvío permitido\n"
-        "• Duración: 30 días\n\n"
-        "*Plan Medio - 150 CUP:*\n"
-        "• 40 búsquedas diarias\n"
-        "• Reenvío permitido\n"
-        "• Duración: 30 días\n\n"
-        "*Plan Pro - 200 CUP:*\n"
-        "• 60 búsquedas diarias\n"
-        "• Reenvío permitido\n"
-        "• Duración: 30 días\n\n"
-        "👉 Selecciona un plan para contactar con el administrador y adquirirlo:",
+        "🎯 *Planes Disponibles*\n\n"
+        "Selecciona un plan para ver más detalles:",
         reply_markup=reply_markup,
         parse_mode=ParseMode.MARKDOWN
     )
+
+async def plan_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle plan button clicks."""
+    query = update.callback_query
+    plan_type = query.data.replace('plan_', '')
+    
+    if plan_type in PLANS_INFO:
+        plan = PLANS_INFO[plan_type]
+        features_text = '\n'.join([f"✅ {feature}" for feature in plan['features']])
+        
+        await query.answer()
+        await query.edit_message_text(
+            f"📋 *{plan['name']}*\n\n"
+            f"💰 Precio: {plan['price']}\n\n"
+            f"*Características:*\n"
+            f"{features_text}\n\n"
+            f"Para adquirir este plan, contacta al administrador: @admin",
+            parse_mode=ParseMode.MARKDOWN
+        )
     
     # Show available plans to regular users
     keyboard = []
