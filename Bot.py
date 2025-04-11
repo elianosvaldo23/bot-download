@@ -690,7 +690,7 @@ async def init_bot(application: Application) -> None:
 def main() -> None:
     """Start the bot."""
     # Create the Application
-    application = Application.builder().token(TOKEN).build()
+    application = Application.builder().token(TOKEN).job_queue(True).build()
 
     # Add handlers
     application.add_handler(CommandHandler("start", start))
