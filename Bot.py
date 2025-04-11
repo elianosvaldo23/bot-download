@@ -18,7 +18,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Bot configuration
-TOKEN = "7551775190:AAH5f-By7WIjmwd4kKBvekj3lzWLGspQQ8g"
+TOKEN = "7551775190:AAFtrWkTZYAqK0Ei0fptBzsP4VHRQGi9ISw"
 CHANNEL_ID = -1002302159104
 ADMIN_ID = 1742433244
 
