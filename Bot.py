@@ -94,7 +94,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     user_data = db.get_user(user.id)
 
-    if not user_data:  # Solo registrar si el usuario no existe
+    if not user_data:  # Registrar solo si el usuario no existe
         db.add_user(
             user.id,
             user.username,
@@ -102,11 +102,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             user.last_name
         )
         await update.message.reply_text(
-            f"¡Hola {user.first_name}! has sido  Registrado correctamente.\n"
+            f"¡Hola {user.first_name}! Registrado correctamente.\n"
             "Comandos disponibles:\n"
         	"/start - Iniciar el bot\n"
         	"/help - Mostrar ayuda\n"
-        	"/plan - Ver planes disponibles\n"
+       	 "/plan - Ver planes disponibles\n"
         	"/perfil - Ver tu perfil y plan actual\n"
         	"/config - Configurar preferencias"
         )
@@ -160,89 +160,48 @@ async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     )
 
 async def per_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle the /per command for admin to give permissions."""
+    """Otorga permisos premium a un usuario."""
     user_id = update.effective_user.id
     args = context.args
 
-    # Verificar si es el administrador y está configurando permisos para otro usuario
-    if user_id == ADMIN_ID and len(args) >= 3:
+    if user_id == db.get_admin_id() and len(args) >= 3:
         try:
-            # Extraer los argumentos
             username = args[0].replace("@", "")
             days = int(args[1])
             daily_searches = int(args[2])
 
-            # Obtener el usuario de la base de datos
             user_data = db.get_user_by_username(username)
             if not user_data:
-                await update.message.reply_text(
-                    "❌ Usuario no encontrado en la base de datos.\n"
-                    "El usuario debe iniciar el bot primero con /start"
-                )
+                await update.message.reply_text("❌ Usuario no encontrado. El usuario debe usar /start primero.")
                 return
 
-            # Validar los valores
-            if days <= 0 or daily_searches <= 0:
-                await update.message.reply_text(
-                    "❌ Los días y búsquedas deben ser números positivos."
-                )
-                return
+            db.update_plan(user_data['user_id'], 'premium', days, daily_searches)
 
-            # Actualizar el plan del usuario
-            try:
-                db.update_plan(user_data['user_id'], 'premium', days, daily_searches)
-                
-                await update.message.reply_text(
-                    f"✅ Permisos actualizados exitosamente para @{username}\n\n"
+            await update.message.reply_text(
+                f"✅ Permisos otorgados a @{username}\n"
+                f"📅 Duración: {days} días\n"
+                f"🔍 Búsquedas diarias: {daily_searches}\n"
+                f"↗️ Reenvío: Permitido\n\n"
+                "El usuario puede usar el bot con todas las funciones."
+            )
+
+            await context.bot.send_message(
+                chat_id=user_data['user_id'],
+                text=(
+                    f"🎉 ¡Has recibido acceso premium!\n\n"
                     f"📅 Duración: {days} días\n"
                     f"🔍 Búsquedas diarias: {daily_searches}\n"
                     f"↗️ Reenvío: Permitido\n\n"
-                    f"El usuario puede usar el bot con todas las funciones ahora."
+                    "Usa /perfil para ver los detalles de tu plan."
                 )
+            )
 
-                # Notificar al usuario que recibió los permisos
-                try:
-                    await context.bot.send_message(
-                        chat_id=user_data['user_id'],
-                        text=(
-                            "🎉 ¡Has recibido acceso premium!\n\n"
-                            f"📅 Duración: {days} días\n"
-                            f"🔍 Búsquedas diarias: {daily_searches}\n"
-                            f"↗️ Reenvío: Permitido\n\n"
-                            "Usa /perfil para ver los detalles de tu plan."
-                        )
-                    )
-                except Exception as e:
-                    logger.error(f"Error notifying user {username}: {e}")
-                    await update.message.reply_text(
-                        "✅ Permisos actualizados, pero no se pudo notificar al usuario."
-                    )
-
-            except Exception as e:
-                logger.error(f"Error updating permissions for user {username}: {e}")
-                await update.message.reply_text(
-                    "❌ Error al actualizar los permisos. Por favor, intenta de nuevo."
-                )
-                
         except ValueError:
-            await update.message.reply_text(
-                "❌ Formato incorrecto. Uso correcto:\n"
-                "/per @usuario días búsquedas\n\n"
-                "Ejemplo: /per @usuario 30 20"
-            )
+            await update.message.reply_text("❌ Uso incorrecto. Ejemplo: /per @usuario 30 20")
         except Exception as e:
-            logger.error(f"Error in per command: {e}")
-            await update.message.reply_text(
-                "❌ Ocurrió un error. Por favor, intenta de nuevo."
-            )
-        return
-
-    # Si no es el administrador, mostrar mensaje de error
-    if user_id != ADMIN_ID:
-        await update.message.reply_text(
-            "❌ No tienes permiso para usar este comando.\n"
-            "Este comando es solo para administradores."
-        )
+            await update.message.reply_text(f"❌ Error: {str(e)}")
+    else:
+        await update.message.reply_text("❌ No tienes permisos para usar este comando.")
 
 async def perfil_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Muestra el perfil del usuario."""
@@ -254,25 +213,26 @@ async def perfil_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     plan_type = user_data['plan_type']
-    plan = PLANS.get(plan_type, PLANS['free'])
+    plan_expiry = user_data['plan_expiry']
+    daily_searches_limit = user_data['daily_searches_limit']
+    can_forward = user_data['can_forward']
 
     remaining_time = ""
-    if plan_type != 'free' and user_data['plan_expiry']:
-        expiry = datetime.strptime(user_data['plan_expiry'], '%Y-%m-%d %H:%M:%S')
+    if plan_type != 'free' and plan_expiry:
+        expiry = datetime.strptime(plan_expiry, '%Y-%m-%d %H:%M:%S')
         if expiry > datetime.now():
             delta = expiry - datetime.now()
             remaining_time = f"\n⏳ Tiempo restante: {delta.days} días"
 
     daily_searches_used = db.get_daily_usage(user.id)
-    daily_limit = user_data['daily_searches_limit']
 
     await update.message.reply_text(
         f"👤 *Perfil de Usuario*\n\n"
         f"🆔 ID: `{user.id}`\n"
         f"👤 Usuario: @{user.username}\n"
-        f"📊 Plan actual: *{plan.name}*\n"
-        f"🔍 Búsquedas hoy: {daily_searches_used}/{daily_limit}\n"
-        f"↗️ Reenvío: {'Permitido' if user_data['can_forward'] else 'No permitido'}"
+        f"📊 Plan actual: *{plan_type}*\n"
+        f"🔍 Búsquedas hoy: {daily_searches_used}/{daily_searches_limit}\n"
+        f"↗️ Reenvío: {'Permitido' if can_forward else 'No permitido'}"
         f"{remaining_time}\n\n"
         f"Para cambiar de plan usa /plan",
         parse_mode=ParseMode.MARKDOWN
@@ -1132,6 +1092,9 @@ async def send_keepalive_message(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error sending keepalive message: {e}")
 
+# Mantener el servidor Flask activo
+    keep_alive()
+    
 def main() -> None:
     """Start the bot."""
     application = Application.builder().token(TOKEN).build()
@@ -1169,9 +1132,6 @@ def main() -> None:
 
     # Initialize the bot
     application.job_queue.run_once(lambda context: init_bot(application), 0)
-	
-	# Mantener el servidor Flask activo
-    keep_alive()
 	
     # Start the bot
     print("Bot started!")
