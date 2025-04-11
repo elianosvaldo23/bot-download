@@ -3,9 +3,15 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Dict
 
 class Database:
-    def __init__(self, db_file: str = "bot.db"):
-        self.db_file = db_file
-        self.init_db()
+    def __init__(self):
+        # Inicialización de la base de datos
+        self.admin_id = 1742433244  # ID del administrador (puedes cambiarlo)
+
+    def get_admin_id(self):
+        """Retorna el ID del administrador."""
+        return self.admin_id
+
+    # Otros métodos de la clase Database...
     
     def init_db(self):
         """Initialize database tables."""
