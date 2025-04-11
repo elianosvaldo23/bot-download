@@ -196,28 +196,6 @@ async def plan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             ])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        "🎬 *Planes Disponibles*\n\n"
-        "*Plan Gratuito:*\n"
-        "• 3 búsquedas diarias\n"
-        "• Sin reenvío\n\n"
-        "*Plan Estándar - 100 CUP:*\n"
-        "• 20 búsquedas diarias\n"
-        "• Reenvío permitido\n"
-        "• Duración: 30 días\n\n"
-        "*Plan Medio - 150 CUP:*\n"
-        "• 40 búsquedas diarias\n"
-        "• Reenvío permitido\n"
-        "• Duración: 30 días\n\n"
-        "*Plan Pro - 200 CUP:*\n"
-        "• 60 búsquedas diarias\n"
-        "• Reenvío permitido\n"
-        "• Duración: 30 días\n\n"
-        "Selecciona un plan para más información:",
-        reply_markup=reply_markup,
-        parse_mode=ParseMode.MARKDOWN
-    )
 
 async def del_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /del command to remove user permissions."""
@@ -999,16 +977,19 @@ async def init_bot(application: Application) -> None:
     """Initialize the bot."""
     logger.info("Initializing bot...")
     
-    # Schedule daily plan expiration check
-    application.job_queue.run_daily(
-        expire_plans_job,
-        time=datetime.time(hour=0, minute=0)
-    )
-    
-    # Get the latest message ID
-    await get_latest_message_id(application)
-    
-    logger.info(f"Bot initialized successfully! Latest message ID: {last_message_id}")
+    try:
+        # Schedule daily plan expiration check
+        application.job_queue.run_daily(
+            expire_plans_job,
+            time=time(0, 0)  # Usar time en lugar de datetime.time
+        )
+        
+        # Get the latest message ID
+        await get_latest_message_id(application)
+        
+        logger.info(f"Bot initialized successfully! Latest message ID: {last_message_id}")
+    except Exception as e:
+        logger.error(f"Error in init_bot: {e}")
 
 async def send_keepalive_message(context: ContextTypes.DEFAULT_TYPE):
     """Send periodic message to keep the bot active."""
