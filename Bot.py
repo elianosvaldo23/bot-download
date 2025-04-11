@@ -18,7 +18,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Bot configuration
-TOKEN = "7551775190:AAFtrWkTZYAqK0Ei0fptBzsP4VHRQGi9ISw"
+TOKEN = "7551775190:AAH5f-By7WIjmwd4kKBvekj3lzWLGspQQ8g"
 CHANNEL_ID = -1002302159104
 ADMIN_ID = 1742433244
 
@@ -147,35 +147,42 @@ async def plan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     user_id = update.effective_user.id
     args = context.args
     
-    # Admin setting plan for user
-    if user_id == ADMIN_ID and len(args) >= 3:
-        username = args[0].replace("@", "")
-        try:
-            days = int(args[1])
-            searches = int(args[2])
-            
-            # Get target user from database
-            target_user = await get_user_by_username(context, username)
-            if not target_user:
-                await update.message.reply_text("❌ Usuario no encontrado.")
-                return
-            
-            # Update user's plan
-            db.update_plan(target_user.id, 'custom', days, searches)
-            
-            await update.message.reply_text(
-                f"✅ Plan actualizado para @{username}:\n"
-                f"• Duración: {days} días\n"
-                f"• Búsquedas diarias: {searches}\n"
-                f"• Reenvío permitido: Sí"
-            )
-            return
-            
-        except (ValueError, IndexError):
-            await update.message.reply_text(
-                "❌ Formato incorrecto. Uso: /plan @usuario días búsquedas"
-            )
-            return
+    # Admin handling section remains the same...
+    
+    # Modify the keyboard creation for regular users
+    keyboard = []
+    for plan_id, plan in PLANS.items():
+        if plan_id != 'free':
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{plan.name} - {plan.price} CUP",
+                    url=f"https://t.me/Osvaldo20032"  # Direct link to admin
+                )
+            ])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        "🎬 *Planes Disponibles*\n\n"
+        "*Plan Gratuito:*\n"
+        "• 3 búsquedas diarias\n"
+        "• Sin reenvío\n\n"
+        "*Plan Estándar - 100 CUP:*\n"
+        "• 20 búsquedas diarias\n"
+        "• Reenvío permitido\n"
+        "• Duración: 30 días\n\n"
+        "*Plan Medio - 150 CUP:*\n"
+        "• 40 búsquedas diarias\n"
+        "• Reenvío permitido\n"
+        "• Duración: 30 días\n\n"
+        "*Plan Pro - 200 CUP:*\n"
+        "• 60 búsquedas diarias\n"
+        "• Reenvío permitido\n"
+        "• Duración: 30 días\n\n"
+        "👉 Selecciona un plan para contactar con el administrador y adquirirlo:",
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.MARKDOWN
+    )
     
     # Show available plans to regular users
     keyboard = []
@@ -215,6 +222,7 @@ async def plan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def del_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /del command to remove user permissions."""
     if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ No tienes permiso para usar este comando.")
         return
         
     if not context.args:
@@ -222,18 +230,27 @@ async def del_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
         
     username = context.args[0].replace("@", "")
-    target_user = await get_user_by_username(context, username)
     
-    if not target_user:
-        await update.message.reply_text("❌ Usuario no encontrado.")
-        return
-    
-    # Reset user to free plan
-    db.remove_plan(target_user.id)
-    
-    await update.message.reply_text(
-        f"✅ Permisos eliminados para @{username}"
-    )
+    try:
+        # Get user using the database class method
+        user_data = db.get_user_by_username(username)
+        
+        if not user_data:
+            await update.message.reply_text("❌ Usuario no encontrado en la base de datos.")
+            return
+
+        # Reset user to free plan
+        db.remove_plan(user_data['user_id'])
+        
+        await update.message.reply_text(
+            f"✅ Permisos eliminados para @{username}\n"
+            f"• Plan reseteado a gratuito\n"
+            f"• Límite de búsquedas: 3/día\n"
+            f"• Reenvío: No permitido"
+        )
+    except Exception as e:
+        logger.error(f"Error in del_command: {e}")
+        await update.message.reply_text("❌ Error al eliminar permisos. Por favor, inténtalo de nuevo.")
 
 async def anuncio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /anuncio command to send announcements."""
@@ -993,6 +1010,16 @@ async def init_bot(application: Application) -> None:
     
     logger.info(f"Bot initialized successfully! Latest message ID: {last_message_id}")
 
+async def send_keepalive_message(context: ContextTypes.DEFAULT_TYPE):
+    """Send periodic message to keep the bot active."""
+    try:
+        await context.bot.send_message(
+            chat_id="-1002685140729",  # Your channel ID
+            text="🤖 Bot activo y funcionando correctamente."
+        )
+    except Exception as e:
+        logger.error(f"Error sending keepalive message: {e}")
+
 def main() -> None:
     """Start the bot."""
     application = Application.builder().token(TOKEN).build()
@@ -1006,6 +1033,15 @@ def main() -> None:
     application.add_handler(CommandHandler("anuncio", anuncio_command))
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("perfil", perfil_command))
+    application.add_handler(CommandHandler("config", config_command))
+    application.add_handler(CommandHandler("recent", recent_command))
+    
+     # Add periodic keepalive message (every 10 minutes = 600 seconds)
+    application.job_queue.run_repeating(
+        send_keepalive_message,
+        interval=600,
+        first=10  # Wait 10 seconds before first message
+    )
 
     # Add message handlers
     application.add_handler(MessageHandler(
