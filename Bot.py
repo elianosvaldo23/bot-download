@@ -99,12 +99,97 @@ async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         
     await update.message.reply_text(
         "*Comandos de Administrador:*\n\n"
-        "`/plan @usuario días búsquedas` - Asignar plan personalizado\n"
-        "`/del @usuario` - Eliminar permisos especiales\n"
+        "`/per @usuario días búsquedas` - Dar permisos premium\n"
+        "`/del @usuario` - Eliminar permisos\n"
         "`/anuncio mensaje` - Enviar anuncio a todos los usuarios\n"
         "`/stats` - Ver estadísticas del bot",
         parse_mode=ParseMode.MARKDOWN
     )
+
+async def per_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the /per command for admin to give permissions."""
+    user_id = update.effective_user.id
+    args = context.args
+
+    # Verificar si es el administrador y está configurando permisos para otro usuario
+    if user_id == ADMIN_ID and len(args) >= 3:
+        try:
+            # Extraer los argumentos
+            username = args[0].replace("@", "")
+            days = int(args[1])
+            daily_searches = int(args[2])
+
+            # Obtener el usuario de la base de datos
+            user_data = db.get_user_by_username(username)
+            if not user_data:
+                await update.message.reply_text(
+                    "❌ Usuario no encontrado en la base de datos.\n"
+                    "El usuario debe iniciar el bot primero con /start"
+                )
+                return
+
+            # Validar los valores
+            if days <= 0 or daily_searches <= 0:
+                await update.message.reply_text(
+                    "❌ Los días y búsquedas deben ser números positivos."
+                )
+                return
+
+            # Actualizar el plan del usuario
+            try:
+                db.update_plan(user_data['user_id'], 'premium', days, daily_searches)
+                
+                await update.message.reply_text(
+                    f"✅ Permisos actualizados exitosamente para @{username}\n\n"
+                    f"📅 Duración: {days} días\n"
+                    f"🔍 Búsquedas diarias: {daily_searches}\n"
+                    f"↗️ Reenvío: Permitido\n\n"
+                    f"El usuario puede usar el bot con todas las funciones ahora."
+                )
+
+                # Notificar al usuario que recibió los permisos
+                try:
+                    await context.bot.send_message(
+                        chat_id=user_data['user_id'],
+                        text=(
+                            "🎉 ¡Has recibido acceso premium!\n\n"
+                            f"📅 Duración: {days} días\n"
+                            f"🔍 Búsquedas diarias: {daily_searches}\n"
+                            f"↗️ Reenvío: Permitido\n\n"
+                            "Usa /perfil para ver los detalles de tu plan."
+                        )
+                    )
+                except Exception as e:
+                    logger.error(f"Error notifying user {username}: {e}")
+                    await update.message.reply_text(
+                        "✅ Permisos actualizados, pero no se pudo notificar al usuario."
+                    )
+
+            except Exception as e:
+                logger.error(f"Error updating permissions for user {username}: {e}")
+                await update.message.reply_text(
+                    "❌ Error al actualizar los permisos. Por favor, intenta de nuevo."
+                )
+                
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Formato incorrecto. Uso correcto:\n"
+                "/per @usuario días búsquedas\n\n"
+                "Ejemplo: /per @usuario 30 20"
+            )
+        except Exception as e:
+            logger.error(f"Error in per command: {e}")
+            await update.message.reply_text(
+                "❌ Ocurrió un error. Por favor, intenta de nuevo."
+            )
+        return
+
+    # Si no es el administrador, mostrar mensaje de error
+    if user_id != ADMIN_ID:
+        await update.message.reply_text(
+            "❌ No tienes permiso para usar este comando.\n"
+            "Este comando es solo para administradores."
+        )
 
 async def perfil_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show user profile and current plan."""
@@ -1010,6 +1095,7 @@ def main() -> None:
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("admin", admin_help))
     application.add_handler(CommandHandler("plan", plan_command))
+    application.add_handler(CommandHandler("per", per_command))
     application.add_handler(CommandHandler("del", del_command))
     application.add_handler(CommandHandler("anuncio", anuncio_command))
     application.add_handler(CommandHandler("stats", stats_command))
