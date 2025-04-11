@@ -7,6 +7,8 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from telegram.constants import ParseMode, ChatAction
 from telegram.error import TelegramError
+from database import Database
+from plans import PLANS
 
 # Enable logging
 logging.basicConfig(
@@ -18,6 +20,10 @@ logger = logging.getLogger(__name__)
 # Bot configuration
 TOKEN = "7551775190:AAH5f-By7WIjmwd4kKBvekj3lzWLGspQQ8g"
 CHANNEL_ID = -1002302159104
+ADMIN_ID = 1742433244
+
+# Initialize database
+db = Database()
 
 # Store the latest message ID
 last_message_id = 0
@@ -42,14 +48,24 @@ user_preferences = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /start is issued."""
+    user = update.effective_user
+    
+    # Register user in database
+    db.add_user(
+        user.id,
+        user.username,
+        user.first_name,
+        user.last_name
+    )
+    
     await update.message.reply_text(
-        "¡Hola! Soy un bot de búsqueda de películas y series. "
-        "Envíame el nombre de lo que estás buscando y te enviaré los resultados directamente.\n\n"
+        f"¡Hola {user.first_name}! Soy un bot de búsqueda de películas y series.\n\n"
         "Comandos disponibles:\n"
         "/start - Iniciar el bot\n"
         "/help - Mostrar ayuda\n"
-        "/config - Configurar preferencias\n"
-        "/recientes - Ver contenido reciente"
+        "/plan - Ver planes disponibles\n"
+        "/perfil - Ver tu perfil y plan actual\n"
+        "/config - Configurar preferencias"
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -59,18 +75,302 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "*Comandos disponibles:*\n"
         "/start - Iniciar el bot\n"
         "/help - Mostrar esta ayuda\n"
-        "/config - Configurar preferencias\n"
-        "/recientes - Ver contenido reciente\n\n"
+        "/plan - Ver planes disponibles\n"
+        "/perfil - Ver tu perfil y plan actual\n"
+        "/config - Configurar preferencias\n\n"
         "*Búsqueda:*\n"
         "- Simplemente envía el nombre de la película o serie\n"
         "- Puedes usar '#película' o '#serie' para filtrar\n"
         "- Usa '+año' para buscar por año (ej: 'Avatar +2009')\n\n"
-        "*Consejos:*\n"
-        "- Sé específico en tus búsquedas\n"
-        "- Los resultados se ordenan por relevancia\n"
-        "- El contenido está protegido contra reenvío",
+        "*Plan Gratuito:*\n"
+        "- 3 búsquedas diarias\n"
+        "- Sin reenvío de contenido\n\n"
+        "*Planes Premium:*\n"
+        "- Más búsquedas diarias\n"
+        "- Reenvío de contenido permitido\n"
+        "- Usa /plan para ver las opciones",
         parse_mode=ParseMode.MARKDOWN
     )
+
+async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show admin commands help."""
+    if update.effective_user.id != ADMIN_ID:
+        return
+        
+    await update.message.reply_text(
+        "*Comandos de Administrador:*\n\n"
+        "`/plan @usuario días búsquedas` - Asignar plan personalizado\n"
+        "`/del @usuario` - Eliminar permisos especiales\n"
+        "`/anuncio mensaje` - Enviar anuncio a todos los usuarios\n"
+        "`/stats` - Ver estadísticas del bot",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def perfil_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show user profile and current plan."""
+    user = update.effective_user
+    user_data = db.get_user(user.id)
+    
+    if not user_data:
+        await update.message.reply_text("❌ Error al obtener tu perfil.")
+        return
+    
+    plan_type = user_data['plan_type']
+    plan = PLANS.get(plan_type, PLANS['free'])
+    
+    # Calculate remaining time if not free plan
+    remaining_time = ""
+    if plan_type != 'free' and user_data['plan_expiry']:
+        expiry = datetime.strptime(user_data['plan_expiry'], '%Y-%m-%d %H:%M:%S')
+        if expiry > datetime.now():
+            delta = expiry - datetime.now()
+            remaining_time = f"\n⏳ Tiempo restante: {delta.days} días"
+    
+    # Get today's usage
+    daily_searches_used = db.get_daily_usage(user.id)
+    daily_limit = user_data['daily_searches_limit']
+    
+    await update.message.reply_text(
+        f"👤 *Perfil de Usuario*\n\n"
+        f"🆔 ID: `{user.id}`\n"
+        f"👤 Usuario: @{user.username}\n"
+        f"📊 Plan actual: *{plan.name}*\n"
+        f"🔍 Búsquedas hoy: {daily_searches_used}/{daily_limit}\n"
+        f"↗️ Reenvío: {'Permitido' if user_data['can_forward'] else 'No permitido'}"
+        f"{remaining_time}\n\n"
+        f"Para cambiar de plan usa /plan",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def plan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the /plan command."""
+    user_id = update.effective_user.id
+    args = context.args
+    
+    # Admin setting plan for user
+    if user_id == ADMIN_ID and len(args) >= 3:
+        username = args[0].replace("@", "")
+        try:
+            days = int(args[1])
+            searches = int(args[2])
+            
+            # Get target user from database
+            target_user = await get_user_by_username(context, username)
+            if not target_user:
+                await update.message.reply_text("❌ Usuario no encontrado.")
+                return
+            
+            # Update user's plan
+            db.update_plan(target_user.id, 'custom', days, searches)
+            
+            await update.message.reply_text(
+                f"✅ Plan actualizado para @{username}:\n"
+                f"• Duración: {days} días\n"
+                f"• Búsquedas diarias: {searches}\n"
+                f"• Reenvío permitido: Sí"
+            )
+            return
+            
+        except (ValueError, IndexError):
+            await update.message.reply_text(
+                "❌ Formato incorrecto. Uso: /plan @usuario días búsquedas"
+            )
+            return
+    
+    # Show available plans to regular users
+    keyboard = []
+    for plan_id, plan in PLANS.items():
+        if plan_id != 'free':
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{plan.name} - {plan.price} CUP",
+                    callback_data=f"buy_plan_{plan_id}"
+                )
+            ])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        "🎬 *Planes Disponibles*\n\n"
+        "*Plan Gratuito:*\n"
+        "• 3 búsquedas diarias\n"
+        "• Sin reenvío\n\n"
+        "*Plan Estándar - 100 CUP:*\n"
+        "• 20 búsquedas diarias\n"
+        "• Reenvío permitido\n"
+        "• Duración: 30 días\n\n"
+        "*Plan Medio - 150 CUP:*\n"
+        "• 40 búsquedas diarias\n"
+        "• Reenvío permitido\n"
+        "• Duración: 30 días\n\n"
+        "*Plan Pro - 200 CUP:*\n"
+        "• 60 búsquedas diarias\n"
+        "• Reenvío permitido\n"
+        "• Duración: 30 días\n\n"
+        "Selecciona un plan para más información:",
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def del_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the /del command to remove user permissions."""
+    if update.effective_user.id != ADMIN_ID:
+        return
+        
+    if not context.args:
+        await update.message.reply_text("❌ Uso: /del @usuario")
+        return
+        
+    username = context.args[0].replace("@", "")
+    target_user = await get_user_by_username(context, username)
+    
+    if not target_user:
+        await update.message.reply_text("❌ Usuario no encontrado.")
+        return
+    
+    # Reset user to free plan
+    db.remove_plan(target_user.id)
+    
+    await update.message.reply_text(
+        f"✅ Permisos eliminados para @{username}"
+    )
+
+async def anuncio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the /anuncio command to send announcements."""
+    if update.effective_user.id != ADMIN_ID:
+        return
+        
+    if not context.args:
+        await update.message.reply_text("❌ Uso: /anuncio mensaje")
+        return
+        
+    message = " ".join(context.args)
+    
+    # Get all users from database
+    users = db.get_all_users()
+    sent = 0
+    failed = 0
+    
+    status_msg = await update.message.reply_text("📤 Enviando anuncio...")
+    
+    for user in users:
+        try:
+            await context.bot.send_message(
+                chat_id=user['user_id'],
+                text=f"📢 *ANUNCIO*\n\n{message}",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            sent += 1
+        except Exception as e:
+            failed += 1
+            logger.error(f"Error sending announcement to {user['user_id']}: {e}")
+        
+        # Update status every 10 users
+        if (sent + failed) % 10 == 0:
+            await status_msg.edit_text(
+                f"📤 Enviando anuncio...\n"
+                f"✅ Enviados: {sent}\n"
+                f"❌ Fallidos: {failed}"
+            )
+    
+    await status_msg.edit_text(
+        f"✅ Anuncio enviado\n"
+        f"📨 Total enviados: {sent}\n"
+        f"❌ Total fallidos: {failed}"
+    )
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show bot statistics to admin."""
+    if update.effective_user.id != ADMIN_ID:
+        return
+    
+    stats = db.get_stats()
+    
+    await update.message.reply_text(
+        "📊 *Estadísticas del Bot*\n\n"
+        f"👥 Usuarios totales: {stats['total_users']}\n"
+        f"💎 Usuarios premium: {stats['premium_users']}\n"
+        f"🔍 Búsquedas hoy: {stats['searches_today']}\n"
+        f"📈 Búsquedas totales: {stats['total_searches']}",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle user searches with plan restrictions."""
+    user_id = update.effective_user.id
+    user_data = db.get_user(user_id)
+    
+    if not user_data:
+        await update.message.reply_text(
+            "❌ Error: Usuario no registrado. Usa /start para registrarte."
+        )
+        return
+    
+    # Check if user can make more searches today
+    if not db.increment_daily_usage(user_id):
+        # Show purchase plans if limit exceeded
+        keyboard = []
+        for plan_id, plan in PLANS.items():
+            if plan_id != 'free':
+                keyboard.append([
+                    InlineKeyboardButton(
+                        f"{plan.name} - {plan.price} CUP",
+                        callback_data=f"buy_plan_{plan_id}"
+                    )
+                ])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "❌ Has alcanzado tu límite de búsquedas diarias.\n\n"
+            "Para continuar buscando, adquiere un plan premium:",
+            reply_markup=reply_markup
+        )
+        return
+    
+    # Process the search
+    await search_content(update, context)
+
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle callback queries."""
+    query = update.callback_query
+    user_id = query.from_user.id
+    
+    if query.data.startswith("buy_plan_"):
+        plan_id = query.data.replace("buy_plan_", "")
+        plan = PLANS.get(plan_id)
+        
+        if not plan:
+            await query.answer("❌ Plan no válido")
+            return
+            
+        # Show payment instructions
+        await query.message.edit_text(
+            f"💳 *Comprar Plan {plan.name}*\n\n"
+            f"Precio: {plan.price} CUP\n"
+            f"Duración: {plan.duration_days} días\n"
+            f"Búsquedas diarias: {plan.daily_searches}\n"
+            f"Reenvío: {'Permitido' if plan.can_forward else 'No permitido'}\n\n"
+            "Para completar la compra, contacta con el administrador: @admin",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    
+    elif query.data.startswith("send_"):
+        await handle_send_callback(query, context)
+
+async def expire_plans_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Check and expire plans daily."""
+    expired_users = db.check_expired_plans()
+    
+    for user_id in expired_users:
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text="⚠️ Tu plan premium ha expirado. Has vuelto al plan gratuito.\n"
+                     "Usa /plan para ver las opciones de renovación."
+            )
+        except Exception as e:
+            logger.error(f"Error notifying expired plan to user {user_id}: {e}")
 
 async def config_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Configure user preferences."""
@@ -681,29 +981,45 @@ async def handle_config_callback(query, context, action):
 async def init_bot(application: Application) -> None:
     """Initialize the bot."""
     logger.info("Initializing bot...")
-
+    
+    # Schedule daily plan expiration check
+    application.job_queue.run_daily(
+        expire_plans_job,
+        time=datetime.time(hour=0, minute=0)
+    )
+    
     # Get the latest message ID
     await get_latest_message_id(application)
-
+    
     logger.info(f"Bot initialized successfully! Latest message ID: {last_message_id}")
 
 def main() -> None:
     """Start the bot."""
-    # Create the Application
     application = Application.builder().token(TOKEN).build()
 
-    # Add handlers
+    # Add command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("config", config_command))
-    application.add_handler(CommandHandler("recientes", recent_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_content))
+    application.add_handler(CommandHandler("admin", admin_help))
+    application.add_handler(CommandHandler("plan", plan_command))
+    application.add_handler(CommandHandler("del", del_command))
+    application.add_handler(CommandHandler("anuncio", anuncio_command))
+    application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("perfil", perfil_command))
+
+    # Add message handlers
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND,
+        handle_search
+    ))
+
+    # Add callback query handler
     application.add_handler(CallbackQueryHandler(handle_callback))
 
     # Initialize the bot
     application.job_queue.run_once(lambda context: init_bot(application), 0)
 
-    # Run the bot until the user presses Ctrl-C
+    # Start the bot
     print("Bot started!")
     application.run_polling()
 
