@@ -1,30 +1,3 @@
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-
-# Add this at the top with other constants
-PLANS_INFO = {
-    'basic': {
-        'name': 'Plan Básico',
-        'price': '5 USD',
-        'searches': 10,
-        'days': 30,
-        'features': ['10 búsquedas diarias', 'Reenvío permitido', 'Duración: 30 días']
-    },
-    'premium': {
-        'name': 'Plan Premium',
-        'price': '10 USD',
-        'searches': 20,
-        'days': 30,
-        'features': ['20 búsquedas diarias', 'Reenvío permitido', 'Duración: 30 días']
-    },
-    'unlimited': {
-        'name': 'Plan Ilimitado',
-        'price': '20 USD',
-        'searches': 999,
-        'days': 30,
-        'features': ['Búsquedas ilimitadas', 'Reenvío permitido', 'Duración: 30 días']
-    }
-}
-
 import sqlite3
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict
@@ -150,29 +123,24 @@ class Database:
         return True
     
     def update_plan(self, user_id: int, plan_type: str, days: int, searches: int):
-    """Update user's plan."""
-    conn = sqlite3.connect(self.db_file)
-    c = conn.cursor()
-    
-    expiry = datetime.now() + timedelta(days=days)
-    can_forward = plan_type != 'free'
-    
-    # First reset daily usage
-    today = datetime.now().date()
-    c.execute('DELETE FROM daily_usage WHERE user_id = ? AND date = ?', (user_id, today))
-    
-    # Then update the plan
-    c.execute('''
-        UPDATE users 
-        SET plan_type = ?, 
-            plan_expiry = ?,
-            daily_searches_limit = ?,
-            can_forward = ?
-        WHERE user_id = ?
-    ''', (plan_type, expiry, searches, can_forward, user_id))
-    
-    conn.commit()
-    conn.close()
+        """Update user's plan."""
+        conn = sqlite3.connect(self.db_file)
+        c = conn.cursor()
+        
+        expiry = datetime.now() + timedelta(days=days)
+        can_forward = plan_type != 'free'
+        
+        c.execute('''
+            UPDATE users 
+            SET plan_type = ?, 
+                plan_expiry = ?,
+                daily_searches_limit = ?,
+                can_forward = ?
+            WHERE user_id = ?
+        ''', (plan_type, expiry, searches, can_forward, user_id))
+        
+        conn.commit()
+        conn.close()
     
     def remove_plan(self, user_id: int):
         """Reset user to free plan."""
@@ -245,4 +213,4 @@ class Database:
             'premium_users': premium_users,
             'searches_today': searches_today,
             'total_searches': total_searches
-        }
+    }
