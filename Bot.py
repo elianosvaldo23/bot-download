@@ -161,22 +161,37 @@ async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def per_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Otorga permisos premium a un usuario."""
-    user_id = update.effective_user.id
-    args = context.args
+    user_id = update.effective_user.id  # ID del usuario que ejecuta el comando
+    args = context.args  # Argumentos proporcionados al comando
 
+    # Verificar si el usuario es administrador y si se proporcionaron los argumentos necesarios
     if user_id == db.get_admin_id() and len(args) >= 3:
         try:
-            username = args[0].replace("@", "")
-            days = int(args[1])
-            daily_searches = int(args[2])
+            # Extraer los argumentos
+            username = args[0].replace("@", "")  # Quitar '@' del nombre de usuario
+            days = int(args[1])  # Días del plan
+            daily_searches = int(args[2])  # Límite de búsquedas diarias
 
+            # Obtener el usuario de la base de datos
             user_data = db.get_user_by_username(username)
             if not user_data:
-                await update.message.reply_text("❌ Usuario no encontrado. El usuario debe usar /start primero.")
+                await update.message.reply_text(
+                    "❌ Usuario no encontrado en la base de datos.\n"
+                    "El usuario debe iniciar el bot primero con /start."
+                )
                 return
 
+            # Validar los valores
+            if days <= 0 or daily_searches <= 0:
+                await update.message.reply_text(
+                    "❌ Los días y búsquedas deben ser números positivos."
+                )
+                return
+
+            # Actualizar el plan del usuario
             db.update_plan(user_data['user_id'], 'premium', days, daily_searches)
 
+            # Confirmar al administrador
             await update.message.reply_text(
                 f"✅ Permisos otorgados a @{username}\n"
                 f"📅 Duración: {days} días\n"
@@ -185,21 +200,31 @@ async def per_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 "El usuario puede usar el bot con todas las funciones."
             )
 
-            await context.bot.send_message(
-                chat_id=user_data['user_id'],
-                text=(
-                    f"🎉 ¡Has recibido acceso premium!\n\n"
-                    f"📅 Duración: {days} días\n"
-                    f"🔍 Búsquedas diarias: {daily_searches}\n"
-                    f"↗️ Reenvío: Permitido\n\n"
-                    "Usa /perfil para ver los detalles de tu plan."
+            # Notificar al usuario que recibió los permisos
+            try:
+                await context.bot.send_message(
+                    chat_id=user_data['user_id'],
+                    text=(
+                        f"🎉 ¡Has recibido acceso premium!\n\n"
+                        f"📅 Duración: {days} días\n"
+                        f"🔍 Búsquedas diarias: {daily_searches}\n"
+                        f"↗️ Reenvío: Permitido\n\n"
+                        "Usa /perfil para ver los detalles de tu plan."
+                    )
                 )
-            )
+            except Exception as e:
+                logger.error(f"Error notificando al usuario @{username}: {e}")
+                await update.message.reply_text(
+                    "✅ Permisos otorgados, pero no se pudo notificar al usuario."
+                )
 
         except ValueError:
-            await update.message.reply_text("❌ Uso incorrecto. Ejemplo: /per @usuario 30 20")
+            await update.message.reply_text(
+                "❌ Uso incorrecto. Ejemplo: /per @usuario 30 20"
+            )
         except Exception as e:
-            await update.message.reply_text(f"❌ Error: {str(e)}")
+            logger.error(f"Error en el comando /per: {e}")
+            await update.message.reply_text("❌ Ocurrió un error. Por favor, intenta de nuevo.")
     else:
         await update.message.reply_text("❌ No tienes permisos para usar este comando.")
 
