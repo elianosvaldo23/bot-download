@@ -147,26 +147,26 @@ class Database:
         self.update_plan(user_id, 'free', 0, 3)
 
     def get_user_by_username(self, username: str) -> Optional[Dict]:
-    """Get user information by username."""
-    conn = sqlite3.connect(self.db_file)
-    c = conn.cursor()
-    
-    c.execute('SELECT * FROM users WHERE username = ?', (username,))
-    result = c.fetchone()
-    conn.close()
-    
-    if result:
-        return {
-            'user_id': result[0],
-            'username': result[1],
-            'first_name': result[2],
-            'last_name': result[3],
-            'registered_date': result[4],
-            'plan_type': result[5],
-            'plan_expiry': result[6],
-            'daily_searches_limit': result[7],
-            'can_forward': bool(result[8])
-        }
+        """Obtener información del usuario por nombre de usuario."""
+        conn = sqlite3.connect(self.db_file)
+        c = conn.cursor()
+        
+        c.execute('SELECT * FROM users WHERE username = ?', (username,))
+        result = c.fetchone()
+        conn.close()
+        
+        if result:
+            return {
+                'user_id': result[0],
+                'username': result[1],
+                'first_name': result[2],
+                'last_name': result[3],
+                'registered_date': result[4],
+                'plan_type': result[5],
+                'plan_expiry': result[6],
+                'daily_searches_limit': result[7],
+                'can_forward': bool(result[8])
+            }
         return None
     
     def get_all_users(self) -> List[Dict]:
