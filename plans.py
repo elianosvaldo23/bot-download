@@ -1,46 +1,36 @@
-from dataclasses import dataclass
-from typing import Dict
+# Plans configuration
 
-@dataclass
-class Plan:
-    name: str
-    price: int
-    duration_days: int
-    daily_searches: int
-    can_forward: bool
-    description: str
-
-PLANS: Dict[str, Plan] = {
-    'free': Plan(
-        name='Gratuito',
-        price=0,
-        duration_days=0,
-        daily_searches=3,
-        can_forward=False,
-        description="Plan gratuito - 3 búsquedas diarias"
-    ),
-    'standard': Plan(
-        name='Estándar',
-        price=100,
-        duration_days=30,
-        daily_searches=20,
-        can_forward=True,
-        description="Plan Estándar - 20 búsquedas diarias, reenvío permitido"
-    ),
-    'medium': Plan(
-        name='Medio',
-        price=150,
-        duration_days=30,
-        daily_searches=40,
-        can_forward=True,
-        description="Plan Medio - 40 búsquedas diarias, reenvío permitido"
-    ),
-    'pro': Plan(
-        name='Pro',
-        price=200,
-        duration_days=30,
-        daily_searches=60,
-        can_forward=True,
-        description="Plan Pro - 60 búsquedas diarias, reenvío permitido"
-    )
+PLANS = {
+    'basic': {
+        'name': 'Plan Básico',
+        'price': 'Gratis',
+        'daily_searches': 3,
+        'daily_requests': 1,
+        'can_forward': False,
+        'duration_days': None  # No expiration
+    },
+    'pro': {
+        'name': 'Plan Pro',
+        'price': '169.99 CUP / 0.49 USD',
+        'daily_searches': 15,
+        'daily_requests': 2,
+        'can_forward': False,
+        'duration_days': 30
+    },
+    'plus': {
+        'name': 'Plan Plus',
+        'price': '649.99 CUP / 1.99 USD',
+        'daily_searches': 50,
+        'daily_requests': 10,
+        'can_forward': True,
+        'duration_days': 30
+    },
+    'ultra': {
+        'name': 'Plan Ultra',
+        'price': '1049.99 CUP / 2.99 USD',
+        'daily_searches': float('inf'),  # Unlimited
+        'daily_requests': float('inf'),  # Unlimited
+        'can_forward': True,
+        'duration_days': 30
+    }
 }
